@@ -1,2 +1,16 @@
+# virtual environment
 venv/
+myenv/
+
+# generated data
+data/
+*.pcap
+*.pcapng
+
+# python cache
 __pycache__/
+*.pyc
+
+# OS junk
+.DS_Store
+Thumbs.db
