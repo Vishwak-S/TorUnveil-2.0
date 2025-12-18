@@ -12,6 +12,12 @@ import os
 import base64
 from io import BytesIO
 import zipfile
+from reportlab.lib.pagesizes import letter, A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Table, TableStyle
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT, TA_JUSTIFY
 
 class ForensicReportGenerator:
     """Generates comprehensive forensic reports for TOR-Unveil"""
@@ -511,11 +517,163 @@ END OF REPORT
     
     def export_to_pdf(self, report_content: str, filename: str = None) -> str:
         """
-        Export report to PDF (simulated - requires reportlab)
-        Note: This is a placeholder for PDF generation
+        Export report to PDF using reportlab
+        
+        Args:
+            report_content: Report content as string
+            filename: Output PDF filename (optional)
+            
+        Returns:
+            Path to created PDF file
         """
-        print("⚠️  PDF export requires reportlab library. Saving as text instead.")
-        return self.save_report_to_file(report_content, filename)
+        if filename is None:
+            filename = os.path.join("data", "reports", f"forensic_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
+        
+        try:
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(filename), exist_ok=True)
+            
+            # Create PDF document
+            doc = SimpleDocTemplate(
+                filename,
+                pagesize=letter,
+                rightMargin=0.5*inch,
+                leftMargin=0.5*inch,
+                topMargin=0.75*inch,
+                bottomMargin=0.75*inch,
+            )
+            
+            # Container for PDF elements
+            story = []
+            styles = getSampleStyleSheet()
+            
+            # Add custom styles
+            title_style = ParagraphStyle(
+                'CustomTitle',
+                parent=styles['Heading1'],
+                fontSize=24,
+                textColor=colors.HexColor('#1a1a1a'),
+                spaceAfter=30,
+                alignment=TA_CENTER,
+                fontName='Helvetica-Bold'
+            )
+            
+            heading_style = ParagraphStyle(
+                'CustomHeading',
+                parent=styles['Heading2'],
+                fontSize=14,
+                textColor=colors.HexColor('#2c2c2c'),
+                spaceAfter=12,
+                spaceBefore=12,
+                fontName='Helvetica-Bold',
+                borderColor=colors.HexColor('#cccccc'),
+                borderPadding=8,
+            )
+            
+            body_style = ParagraphStyle(
+                'CustomBody',
+                parent=styles['Normal'],
+                fontSize=10,
+                textColor=colors.HexColor('#333333'),
+                alignment=TA_JUSTIFY,
+                spaceAfter=6,
+                leading=14,
+            )
+            
+            # Parse report content and add to PDF
+            lines = report_content.split('\n')
+            current_section = ""
+            
+            for line in lines:
+                if not line.strip():
+                    story.append(Spacer(1, 0.1*inch))
+                    continue
+                
+                # Detect headers (lines with = signs)
+                if line.strip().startswith('=') and line.strip().endswith('='):
+                    if story and len(story) > 3:  # Add page break except for first page
+                        story.append(PageBreak())
+                    continue
+                
+                # Detect section headers (all caps, 20+ chars)
+                if line.strip().isupper() and len(line.strip()) > 20:
+                    story.append(Paragraph(line.strip(), heading_style))
+                    story.append(Spacer(1, 0.15*inch))
+                    current_section = line.strip()
+                # Regular content
+                elif line.strip():
+                    # Preserve indentation for readability
+                    indent = len(line) - len(line.lstrip())
+                    if indent > 0:
+                        formatted_line = '&nbsp;' * (indent * 2) + line.strip()
+                    else:
+                        formatted_line = line.strip()
+                    
+                    story.append(Paragraph(formatted_line, body_style))
+            
+            # Add footer with page numbers
+            def add_page_number(canvas, doc):
+                """Add page number to footer"""
+                canvas.setFont("Helvetica", 9)
+                canvas.drawString(
+                    0.5*inch,
+                    0.5*inch,
+                    f"Page {doc.page}"
+                )
+                canvas.drawRightString(
+                    letter[0] - 0.5*inch,
+                    0.5*inch,
+                    f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+            
+            # Build PDF
+            doc.build(story, onFirstPage=add_page_number, onLaterPages=add_page_number)
+            
+            print(f"📄 PDF report exported to {filename}")
+            return filename
+            
+        except ImportError as e:
+            print(f"❌ PDF export requires reportlab library. Install it with: pip install reportlab")
+            print(f"   Saving as text file instead.")
+            return self.save_report_to_file(report_content, filename.replace('.pdf', '.txt'))
+        except Exception as e:
+            print(f"❌ Error exporting to PDF: {e}")
+            print(f"   Falling back to text format.")
+            return self.save_report_to_file(report_content, filename.replace('.pdf', '.txt'))
+    
+    def export_report(self, report_content: str, output_format: str = 'both', 
+                     base_filename: str = None) -> Dict[str, str]:
+        """
+        Export report in specified format(s)
+        
+        Args:
+            report_content: Report content as string
+            output_format: 'txt', 'pdf', or 'both' (default)
+            base_filename: Base filename without extension
+            
+        Returns:
+            Dictionary with format as key and filepath as value
+        """
+        results = {}
+        
+        if base_filename is None:
+            base_filename = f"forensic_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        
+        base_path = os.path.join("data", "reports", base_filename)
+        
+        # Export to text
+        if output_format in ['txt', 'both']:
+            txt_file = self.save_report_to_file(report_content, base_path + '.txt')
+            if txt_file:
+                results['txt'] = txt_file
+        
+        # Export to PDF
+        if output_format in ['pdf', 'both']:
+            pdf_file = self.export_to_pdf(report_content, base_path + '.pdf')
+            if pdf_file:
+                results['pdf'] = pdf_file
+        
+        return results
     
     def create_evidence_package(self, data_files: Dict[str, str], 
                                report_content: str) -> str:

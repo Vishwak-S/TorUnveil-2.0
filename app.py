@@ -1,3 +1,4 @@
+
 """
 app.py - TOR-Unveil Dashboard (CSV-based workflow)
 Main Streamlit application using CSV files for data storage
@@ -98,11 +99,14 @@ st.markdown("""
         color: #6B7280;
         font-family: monospace;
     }
+    .network-graph {
+        background-color: white;
+        border-radius: 10px;
+        padding: 10px;
+        border: 1px solid #e2e8f0;
+    }
 </style>
 """, unsafe_allow_html=True)
-
-# (REST OF YOUR FILE CONTINUES UNCHANGED)
-# ⛔ NOTHING BELOW THIS WAS MODIFIED
 
 # Initialize session state variables
 def init_session_state():
@@ -125,6 +129,10 @@ def init_session_state():
         st.session_state.last_refresh = None
     if 'current_tab' not in st.session_state:
         st.session_state.current_tab = "Dashboard"
+    if 'path_results' not in st.session_state:
+        st.session_state.path_results = None
+    if 'forensic_report' not in st.session_state:
+        st.session_state.forensic_report = None
 
 init_session_state()
 
@@ -340,9 +348,6 @@ def main():
                     st.success(f"Analyzed {len(st.session_state.flows_df)} flows")
                     st.rerun()
         
-       
-
-        
         # Data Pipeline
         st.markdown("### ⚡ Quick Pipeline")
         if st.button("▶️ Run Complete Pipeline", use_container_width=True):
@@ -393,12 +398,15 @@ def main():
             flow_count = len(st.session_state.flows_df) if st.session_state.flows_df is not None else 0
             st.metric("Flows", flow_count)
     
-    # Main content area
-    tab1, tab2, tab3, tab4 = st.tabs([
+    # Main content area - FIXED: All 7 tabs are properly defined
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "📈 Dashboard", 
         "🌐 Tor Network", 
         "📊 PCAP Analysis", 
-        "🔗 Correlation Results"
+        "🔗 Correlation Results",
+        "🛣️ Path Reconstruction",
+        "📋 Forensic Report",
+        "🕸️ Network Visualization"
     ])
     
     # Tab 1: Dashboard
@@ -617,7 +625,7 @@ def main():
                         'ip_address': 'IP Address',
                         'role': 'Role',
                         'country_name': 'Country',
-                        'observed_bandwidth_mbps': 'Bandwidth (Mbps)',
+                        'observed_bandwidth_mbps': "Bandwidth (Mbps)",
                         'uptime_days': 'Uptime (Days)'
                     }),
                     use_container_width=True,
@@ -843,69 +851,643 @@ def main():
                     height=400
                 )
             
-        # ================================
-        # Generate forensic report
-        # ================================
-        st.markdown("### 📄 Forensic Report")
+            # Generate forensic report
+            st.markdown("### 📄 Forensic Report")
+            
+            if st.button("Generate Forensic Report", key="gen_report_tab4"):
+                engine = CorrelationEngine()
+                
+                report_threshold = 0.6
+                report_df = filtered_results[
+                    filtered_results["total_score"] >= report_threshold
+                ].copy()
+                
+                engine.results = report_df.to_dict("records")
+                engine.correlation_stats = st.session_state.correlation_stats
+                
+                report = engine.generate_forensic_report()
+                
+                st.subheader("Forensic Correlation Summary")
+                
+                st.markdown(f"""
+                **Total Correlations:** {len(report_df)}  
+                **High Confidence Matches:** {len(report_df[report_df['total_score'] >= 0.8])}  
+                **Average Correlation Score:** {report_df['total_score'].mean():.2f}
+                """)
+                
+                st.markdown("### 🧾 Correlation Attribute Analysis")
+                
+                report_df["Suspected Tor"] = report_df["total_score"].apply(
+                    lambda x: "YES" if x >= 0.6 else "NO"
+                )
+                
+                report_df["Confidence Level"] = report_df["total_score"].apply(
+                    lambda x: "HIGH" if x >= 0.8 else "MEDIUM" if x >= 0.6 else "LOW"
+                )
+                
+                report_df["Evidence Strength"] = report_df["total_score"].apply(
+                    lambda x: "Strong multi-factor correlation"
+                    if x >= 0.8 else
+                    "Moderate Tor-like behavior"
+                    if x >= 0.6 else
+                    "Weak or inconclusive"
+                )
+                
+                st.dataframe(
+                    report_df[[
+                        "Suspected Tor",
+                        "Confidence Level",
+                        "tor_node_name",
+                        "tor_node_ip",
+                        "tor_node_country",
+                        "src_ip",
+                        "dst_ip",
+                        "total_score",
+                        "Evidence Strength"
+                    ]],
+                    use_container_width=True,
+                    height=320
+                )
+                
+                st.markdown("### 📄 Detailed Forensic Report")
+                st.text_area("Report Content", report, height=350)
+    
+    # Tab 5: Path Reconstruction
+    with tab5:
+        st.markdown('<h2 class="sub-header">Network Path Reconstruction</h2>', unsafe_allow_html=True)
+        
+        if st.session_state.correlation_results is None or st.session_state.correlation_results.empty:
+            st.info("👈 Run correlation analysis first to reconstruct paths")
+        else:
+            st.markdown("### 🛣️ Path Reconstruction Configuration")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                min_confidence = st.slider(
+                    "Minimum Confidence",
+                    min_value=0.0,
+                    max_value=1.0,
+                    value=0.4,
+                    step=0.1
+                )
+            
+            with col2:
+                max_path_length = st.slider(
+                    "Maximum Path Length",
+                    min_value=2,
+                    max_value=10,
+                    value=6,
+                    step=1
+                )
+            
+            if st.button("🔄 Reconstruct Paths", key="reconstruct_paths_btn"):
+                with st.spinner("Reconstructing network paths..."):
+                    try:
+                        reconstructor = PathReconstructor(
+                            max_path_length=max_path_length,
+                            min_confidence=min_confidence
+                        )
+                        
+                        # Run diagnostics first
+                        st.markdown("### 🔍 Diagnostics")
+                        with st.expander("Click to see detailed diagnostics", expanded=True):
+                            diagnosis = reconstructor.diagnose_reconstruction_issues(
+                                st.session_state.correlation_results,
+                                st.session_state.tor_nodes_df
+                            )
+                            
+                            # Display diagnostic metrics
+                            diag_col1, diag_col2, diag_col3, diag_col4 = st.columns(4)
+                            
+                            with diag_col1:
+                                st.metric(
+                                    "Total Correlations",
+                                    diagnosis['total_correlations'],
+                                    delta=f"{diagnosis['correlations_above_threshold']} above threshold"
+                                )
+                            
+                            with diag_col2:
+                                st.metric(
+                                    "Potential Paths",
+                                    diagnosis['potential_paths'],
+                                    delta=f"Can reconstruct"
+                                )
+                            
+                            with diag_col3:
+                                st.metric(
+                                    "Data Issues Found",
+                                    len(diagnosis['issues_found']),
+                                    delta=f"{diagnosis['tor_node_not_in_database']} not in DB"
+                                )
+                            
+                            with diag_col4:
+                                st.metric(
+                                    "Reconstruction Readiness",
+                                    f"{int((diagnosis['potential_paths'] / max(diagnosis['correlations_above_threshold'], 1)) * 100)}%",
+                                    delta="of above-threshold correlations"
+                                )
+                            
+                            # Visual representation of issues
+                            if diagnosis['issues_found']:
+                                st.warning("⚠️ **Issues Found:**")
+                                for issue in diagnosis['issues_found']:
+                                    st.write(f"• {issue}")
+                            else:
+                                st.success("✅ No issues found! Ready to reconstruct paths.")
+                        
+                        # Now reconstruct paths
+                        st.markdown("### 🔄 Reconstructing Paths...")
+                        path_results = reconstructor.reconstruct_paths(
+                            st.session_state.correlation_results,
+                            st.session_state.tor_nodes_df
+                        )
+                        
+                        st.session_state.path_results = path_results
+                        st.success("✅ Path reconstruction completed!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error reconstructing paths: {e}")
+                        import traceback
+                        st.error(traceback.format_exc())
+            
+            if 'path_results' in st.session_state and st.session_state.path_results:
+                path_results = st.session_state.path_results
+                
+                st.markdown("### 📊 Path Statistics")
+                
+                stats = path_results.get('statistics', {})
+                stats_col1, stats_col2, stats_col3, stats_col4 = st.columns(4)
+                
+                with stats_col1:
+                    st.metric("Total Paths", stats.get('total_paths', 0))
+                
+                with stats_col2:
+                    st.metric("Complete Paths", stats.get('complete_paths', 0))
+                
+                with stats_col3:
+                    avg_len = stats.get('avg_path_length', 0)
+                    st.metric("Avg Path Length", f"{avg_len:.1f}" if avg_len > 0 else "N/A")
+                
+                with stats_col4:
+                    high_conf = stats.get('high_confidence_paths', 0)
+                    st.metric("High Confidence", high_conf)
+                
+                # Path details
+                st.markdown("### 🛣️ Reconstructed Paths")
+                
+                paths = path_results.get('paths', [])
+                if paths:
+                    # Create path dataframe for display
+                    path_display_data = []
+                    for i, path in enumerate(paths):
+                        # Use correct field names
+                        source_ip = path.get('source_ip', path.get('src_ip', 'N/A'))
+                        dest_ip = path.get('destination_ip', path.get('dst_ip', 'N/A'))
+                        confidence = path.get('confidence_score', path.get('avg_confidence', 0))
+                        
+                        path_display_data.append({
+                            'Path ID': i + 1,
+                            'Source IP': source_ip if source_ip and source_ip != 'N/A' else 'Unknown',
+                            'Destination IP': dest_ip if dest_ip and dest_ip != 'N/A' else 'Unknown',
+                            'Hops': path.get('hop_count', len(path.get('nodes', []))),
+                            'Confidence': f"{confidence:.3f}" if confidence > 0 else "0.000",
+                            'Nodes': len(path.get('nodes', [])),
+                            'Complete': '✅' if path.get('complete', False) else '❌'
+                        })
+                    
+                    path_df = pd.DataFrame(path_display_data)
+                    
+                    # Display the table with better formatting
+                    if not path_df.empty:
+                        st.dataframe(
+                            path_df,
+                            use_container_width=True,
+                            height=400,
+                            column_config={
+                                "Path ID": st.column_config.NumberColumn(width="small"),
+                                "Source IP": st.column_config.TextColumn(width="medium"),
+                                "Destination IP": st.column_config.TextColumn(width="medium"),
+                                "Hops": st.column_config.NumberColumn(width="small"),
+                                "Confidence": st.column_config.ProgressColumn(
+                                    min_value=0,
+                                    max_value=1,
+                                    format="%.3f"
+                                ),
+                                "Nodes": st.column_config.NumberColumn(width="small"),
+                                "Complete": st.column_config.TextColumn(width="small")
+                            }
+                        )
+                    else:
+                        st.warning("No valid paths to display")
+                    
+                    # Detailed path view
+                    st.markdown("### 📋 Detailed Path Information")
+                    
+                    if len(paths) > 0:
+                        # Create a dropdown with meaningful labels
+                        path_options = []
+                        for i, path in enumerate(paths):
+                            source = path.get('source_ip', path.get('src_ip', 'Unknown'))
+                            dest = path.get('destination_ip', path.get('dst_ip', 'Unknown'))
+                            conf = path.get('confidence_score', path.get('avg_confidence', 0))
+                            label = f"Path {i+1}: {source} → {dest} (Confidence: {conf:.3f})"
+                            path_options.append(label)
+                        
+                        selected_path_label = st.selectbox(
+                            "Select a path to view details",
+                            path_options,
+                            index=0
+                        )
+                        
+                        selected_path_idx = path_options.index(selected_path_label)
+                        selected_path = paths[selected_path_idx]
+                        
+                        # Display path details
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.write(f"**Path ID:** {selected_path.get('path_id', 'N/A')}")
+                            st.write(f"**Source IP:** {selected_path.get('source_ip', selected_path.get('src_ip', 'N/A'))}")
+                            st.write(f"**Destination IP:** {selected_path.get('destination_ip', selected_path.get('dst_ip', 'N/A'))}")
+                            st.write(f"**Confidence Score:** {selected_path.get('confidence_score', selected_path.get('avg_confidence', 0)):.3f}")
+                        
+                        with col2:
+                            st.write(f"**Hop Count:** {selected_path.get('hop_count', 0)}")
+                            st.write(f"**Number of Nodes:** {len(selected_path.get('nodes', []))}")
+                            st.write(f"**Path Type:** {selected_path.get('path_type', 'Tor Circuit')}")
+                            st.write(f"**Complete:** {'Yes' if selected_path.get('complete', False) else 'No'}")
+                        
+                        # Path nodes table
+                        nodes = selected_path.get('nodes', [])
+                        if nodes:
+                            node_data = []
+                            for j, node in enumerate(nodes):
+                                node_data.append({
+                                    'Hop': j + 1,
+                                    'Type': node.get('type', 'Unknown').title(),
+                                    'IP': node.get('ip', 'N/A'),
+                                    'Label': node.get('label', node.get('nickname', 'N/A')),
+                                    'Country': node.get('country', 'N/A'),
+                                    'Bandwidth (Mbps)': node.get('bandwidth_mbps', 0),
+                                    'Confidence': f"{node.get('confidence', 0):.3f}" if node.get('confidence', 0) > 0 else 'N/A'
+                                })
+                            
+                            nodes_df = pd.DataFrame(node_data)
+                            st.dataframe(nodes_df, use_container_width=True)
+                            
+                            # Visual representation of the path
+                            st.markdown("#### 🔄 Path Flow Visualization")
+                            path_flow = " → ".join([f"{node.get('type', 'Node').title()}" for node in nodes])
+                            st.code(path_flow, language='text')
+                        else:
+                            st.info("No node details available for this path")
+                else:
+                    st.warning("No paths reconstructed. Try adjusting the confidence threshold.")
+    
+    # Tab 6: Forensic Report
+    with tab6:
+        st.markdown('<h2 class="sub-header">Comprehensive Forensic Report</h2>', unsafe_allow_html=True)
+        
+        if st.session_state.tor_nodes_df is None or st.session_state.correlation_results is None:
+            st.info("👈 Complete the analysis pipeline to generate forensic reports")
+        else:
+            st.markdown("### 📄 Report Generation")
+            
+            report_col1, report_col2 = st.columns(2)
+            
+            with report_col1:
+                report_title = st.text_input(
+                    "Report Title",
+                    value="TOR-Unveil Forensic Report"
+                )
+            
+            with report_col2:
+                case_reference = st.text_input(
+                    "Case Reference ID",
+                    value="CASE-2024-001"
+                )
+            
+            if st.button("📋 Generate Full Forensic Report", key="gen_report_btn"):
+                with st.spinner("Generating comprehensive forensic report..."):
+                    try:
+                        report_gen = ForensicReportGenerator(report_title=report_title)
+                        
+                        # Prepare flows data
+                        flows_list = []
+                        if st.session_state.flows_df is not None and not st.session_state.flows_df.empty:
+                            flows_list = st.session_state.flows_df.to_dict('records')
+                        
+                        # Prepare path data
+                        paths_data = st.session_state.path_results if 'path_results' in st.session_state else {}
+                        
+                        # Generate report
+                        full_report = report_gen.generate_report(
+                            tor_nodes=st.session_state.tor_nodes_df,
+                            flows=flows_list,
+                            correlations=st.session_state.correlation_results,
+                            paths=paths_data,
+                            stats={
+                                'tor_metrics': st.session_state.tor_metrics,
+                                'flow_stats': st.session_state.flow_stats,
+                                'correlation_stats': st.session_state.correlation_stats
+                            }
+                        )
+                        
+                        st.session_state.forensic_report = full_report
+                        st.success("✅ Forensic report generated!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error generating report: {e}")
+            
+            # In Tab 6: Forensic Report section, update the download section:
 
-        if st.button("Generate Forensic Report"):
-            engine = CorrelationEngine()
+            if 'forensic_report' in st.session_state and st.session_state.forensic_report:
+                report_content = st.session_state.forensic_report
+                
+                st.markdown("### 📊 Report Summary")
+                
+                # Report metrics
+                report_metrics_col1, report_metrics_col2, report_metrics_col3 = st.columns(3)
+                
+                with report_metrics_col1:
+                    tor_count = len(st.session_state.tor_nodes_df) if st.session_state.tor_nodes_df is not None else 0
+                    st.metric("Tor Nodes Analyzed", tor_count)
+                
+                with report_metrics_col2:
+                    flow_count = len(st.session_state.flows_df) if st.session_state.flows_df is not None else 0
+                    st.metric("Network Flows", flow_count)
+                
+                with report_metrics_col3:
+                    corr_count = len(st.session_state.correlation_results) if st.session_state.correlation_results is not None else 0
+                    st.metric("Correlations", corr_count)
+                
+                # Report content tabs
+                report_tab1, report_tab2, report_tab3 = st.tabs(["Full Report", "Executive Summary", "Download"])
+                
+                with report_tab1:
+                    st.markdown("### 📄 Full Report")
+                    st.text_area(
+                        "Complete Forensic Report",
+                        value=report_content if report_content else "No report generated yet",
+                        height=500,
+                        disabled=True
+                    )
+                
+                with report_tab2:
+                    st.markdown("### 📋 Executive Summary")
+                    
+                    summary_text = f"""
+            **Case Reference:** {case_reference}
+            **Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+            **Report Title:** {report_title}
 
-            report_threshold = 0.6
-            report_df = filtered_results[
-                filtered_results["total_score"] >= report_threshold
-            ].copy()
+            **Analysis Summary:**
+            - Total Tor Nodes: {len(st.session_state.tor_nodes_df) if st.session_state.tor_nodes_df is not None else 0}
+            - Network Flows Analyzed: {len(st.session_state.flows_df) if st.session_state.flows_df is not None else 0}
+            - Correlation Results: {len(st.session_state.correlation_results) if st.session_state.correlation_results is not None else 0}
+            - Average Correlation Score: {st.session_state.correlation_stats.get('avg_total_score', 0):.3f}
+            - High Confidence Matches: {st.session_state.correlation_stats.get('high_confidence', 0)}
 
-            engine.results = report_df.to_dict("records")
-            engine.correlation_stats = st.session_state.correlation_stats
-
-            report = engine.generate_forensic_report()
-
-            st.subheader("Forensic Correlation Summary")
-
-            st.markdown(f"""
-            **Total Correlations:** {len(report_df)}  
-            **High Confidence Matches:** {len(report_df[report_df['total_score'] >= 0.8])}  
-            **Average Correlation Score:** {report_df['total_score'].mean():.2f}
-            """)
-
-            st.markdown("### 🧾 Correlation Attribute Analysis")
-
-            report_df["Suspected Tor"] = report_df["total_score"].apply(
-                lambda x: "YES" if x >= 0.6 else "NO"
-            )
-
-            report_df["Confidence Level"] = report_df["total_score"].apply(
-                lambda x: "HIGH" if x >= 0.8 else "MEDIUM" if x >= 0.6 else "LOW"
-            )
-
-            report_df["Evidence Strength"] = report_df["total_score"].apply(
-                lambda x: "Strong multi-factor correlation"
-                if x >= 0.8 else
-                "Moderate Tor-like behavior"
-                if x >= 0.6 else
-                "Weak or inconclusive"
-            )
-
-            st.dataframe(
-                report_df[[
-                    "Suspected Tor",
-                    "Confidence Level",
-                    "tor_node_name",
-                    "tor_node_ip",
-                    "tor_node_country",
-                    "src_ip",
-                    "dst_ip",
-                    "total_score",
-                    "Evidence Strength"
-                ]],
-                use_container_width=True,
-                height=320
-            )
-
-            st.markdown("### 📄 Detailed Forensic Report")
-            st.text_area("Report Content", report, height=350)
-
+            **Findings:**
+            This forensic report documents the analysis of network traffic against the Tor network database.
+            The correlation engine has identified potential Tor usage patterns in the captured traffic.
+                    """
+                    
+                    st.markdown(summary_text)
+                
+                with report_tab3:
+                    st.markdown("### 📥 Download Report")
+                    
+                    download_col1, download_col2, download_col3 = st.columns(3)
+                    
+                    # Download as text - FIXED: Check if report_content exists
+                    with download_col1:
+                        if report_content:
+                            report_bytes = report_content.encode('utf-8')
+                            st.download_button(
+                                label="📄 TXT Format",
+                                data=report_bytes,
+                                file_name=f"{case_reference}_forensic_report.txt",
+                                mime="text/plain",
+                                use_container_width=True
+                            )
+                        else:
+                            st.warning("No report to download")
+                    
+                    # Download as PDF
+                    with download_col2:
+                        if report_content and st.button("📕 Generate PDF", key="gen_pdf_btn", use_container_width=True):
+                            with st.spinner("Generating PDF..."):
+                                try:
+                                    report_gen = ForensicReportGenerator(report_title=report_title)
+                                    pdf_file = report_gen.export_to_pdf(
+                                        report_content,
+                                        filename=f"data/reports/{case_reference}_forensic_report.pdf"
+                                    )
+                                    
+                                    # Read and offer for download
+                                    if pdf_file and os.path.exists(pdf_file):
+                                        with open(pdf_file, 'rb') as f:
+                                            pdf_bytes = f.read()
+                                        
+                                        st.download_button(
+                                            label="📥 Download PDF",
+                                            data=pdf_bytes,
+                                            file_name=f"{case_reference}_forensic_report.pdf",
+                                            mime="application/pdf",
+                                            use_container_width=True
+                                        )
+                                        st.success("✅ PDF generated successfully!")
+                                    else:
+                                        st.error("Failed to generate PDF file")
+                                except Exception as e:
+                                    st.error(f"Error generating PDF: {e}")
+                        elif not report_content:
+                            st.info("Generate a report first")
+                    
+                    # Download correlation results CSV
+                    with download_col3:
+                        if st.session_state.correlation_results is not None and not st.session_state.correlation_results.empty:
+                            csv_data = st.session_state.correlation_results.to_csv(index=False)
+                            st.download_button(
+                                label="📊 Correlations (CSV)",
+                                data=csv_data,
+                                file_name=f"{case_reference}_correlations.csv",
+                                mime="text/csv",
+                                use_container_width=True
+                            )
+                    
+                    # Export both formats at once
+                    st.markdown("---")
+                    st.markdown("### 📦 Export All Formats")
+                    
+                    if report_content and st.button("Export Both TXT + PDF", key="export_both_btn", use_container_width=True):
+                        with st.spinner("Exporting both formats..."):
+                            try:
+                                report_gen = ForensicReportGenerator(report_title=report_title)
+                                results = report_gen.export_report(
+                                    report_content,
+                                    output_format='both',
+                                    base_filename=case_reference
+                                )
+                                
+                                st.success("✅ Both formats exported successfully!")
+                                if results.get('txt'):
+                                    st.info(f"Text file: {results['txt']}")
+                                if results.get('pdf'):
+                                    st.info(f"PDF file: {results['pdf']}")
+                            except Exception as e:
+                                st.error(f"Error exporting: {e}")
+            else:
+                st.info("👈 Generate a forensic report first")   
+    # Tab 7: Network Visualization - FIXED: Now properly visible
+    with tab7:
+        st.markdown('<h2 class="sub-header">Network Graph Visualization</h2>', unsafe_allow_html=True)
+        
+        if st.session_state.correlation_results is None or st.session_state.correlation_results.empty:
+            st.info("👈 Run correlation analysis to visualize network graphs")
+        else:
+            st.markdown("### 🕸️ Network Visualization")
+            
+            # Visualization options
+            viz_col1, viz_col2 = st.columns(2)
+            
+            with viz_col1:
+                visualization_type = st.selectbox(
+                    "Visualization Type",
+                    ["Simple Network Graph", "Compact IP Diagram", "Tor Node Network", "Path Hops"]
+                )
+            
+            with viz_col2:
+                min_score_filter = st.slider(
+                    "Minimum Correlation Score",
+                    min_value=0.0,
+                    max_value=1.0,
+                    value=0.5,
+                    step=0.1
+                )
+            
+            if st.button("🎨 Generate Visualization", key="gen_viz_btn"):
+                with st.spinner("Generating network visualization..."):
+                    try:
+                        visualizer = NetworkVisualizer()
+                        
+                        # Filter data based on score
+                        filtered_corr = st.session_state.correlation_results[
+                            st.session_state.correlation_results['total_score'] >= min_score_filter
+                        ].copy()
+                        
+                        if visualization_type == "Simple Network Graph":
+                            # Create simple network graph
+                            if not filtered_corr.empty:
+                                fig = visualizer.create_simple_network_graph(
+                                    filtered_corr,
+                                    st.session_state.tor_nodes_df
+                                )
+                                st.plotly_chart(fig, use_container_width=True)
+                            else:
+                                st.warning("No correlations found with selected score threshold")
+                        
+                        elif visualization_type == "Compact IP Diagram":
+                            # Create compact IP diagram (like the example image)
+                            if not filtered_corr.empty:
+                                fig = visualizer.create_compact_network_diagram(filtered_corr)
+                                st.plotly_chart(fig, use_container_width=True)
+                            else:
+                                st.warning("No correlations found with selected score threshold")
+                        
+                        elif visualization_type == "Tor Node Network":
+                            # Tor node analysis
+                            if st.session_state.tor_nodes_df is not None and not st.session_state.tor_nodes_df.empty:
+                                # Country distribution
+                                country_counts = st.session_state.tor_nodes_df['country_name'].value_counts().head(15)
+                                
+                                fig = px.treemap(
+                                    names=country_counts.index,
+                                    values=country_counts.values,
+                                    title="Tor Nodes by Country",
+                                    color=country_counts.values,
+                                    color_continuous_scale='Blues'
+                                )
+                                st.plotly_chart(fig, use_container_width=True)
+                            else:
+                                st.warning("No Tor node data available")
+                        
+                        else:  # Path Hops
+                            if 'path_results' in st.session_state:
+                                # Show path distribution
+                                path_results = st.session_state.path_results
+                                paths = path_results.get('paths', [])
+                                
+                                if paths:
+                                    hop_counts = [p.get('hop_count', 0) for p in paths]
+                                    
+                                    fig = px.histogram(
+                                        x=hop_counts,
+                                        nbins=10,
+                                        title="Distribution of Path Hops",
+                                        labels={'x': 'Number of Hops', 'y': 'Frequency'},
+                                        color_discrete_sequence=['#4ECDC4']
+                                    )
+                                    st.plotly_chart(fig, use_container_width=True)
+                                else:
+                                    st.warning("No path data available. Reconstruct paths first.")
+                            else:
+                                st.warning("No path results. Run path reconstruction first.")
+                        
+                        st.success("✅ Visualization generated!")
+                        
+                    except Exception as e:
+                        st.error(f"Error generating visualization: {e}")
+                        import traceback
+                        st.code(traceback.format_exc())
+            
+            # Statistics panel
+            st.markdown("### 📊 Visualization Statistics")
+            
+            stats_col1, stats_col2, stats_col3 = st.columns(3)
+            
+            with stats_col1:
+                if st.session_state.correlation_results is not None:
+                    total_corr = len(st.session_state.correlation_results)
+                    filtered_count = len(st.session_state.correlation_results[
+                        st.session_state.correlation_results['total_score'] >= min_score_filter
+                    ])
+                    st.metric(
+                        "Correlations Displayed",
+                        filtered_count,
+                        delta=f"{total_corr} total"
+                    )
+            
+            with stats_col2:
+                if st.session_state.correlation_results is not None:
+                    unique_ips = len(set(
+                        list(st.session_state.correlation_results['src_ip'].unique()) +
+                        list(st.session_state.correlation_results['dst_ip'].unique())
+                    ))
+                    st.metric("Unique IPs", unique_ips)
+            
+            with stats_col3:
+                if st.session_state.correlation_results is not None:
+                    unique_nodes = st.session_state.correlation_results['tor_node_name'].nunique()
+                    st.metric("Unique Tor Nodes", unique_nodes)
+            
+            # Add a sample visualization if no data is loaded
+            if st.session_state.correlation_results is None:
+                st.markdown("### 🎯 Sample Visualization")
+                st.info("This is how your network graph will look once you load data")
+                
+                # Create a sample visualization
+                sample_data = {
+                    'src_ip': ['192.168.1.100', '192.168.1.101', '10.0.0.1'],
+                    'tor_node_ip': ['185.220.101.1', '185.220.101.2', '185.220.101.3'],
+                    'dst_ip': ['8.8.8.8', '1.1.1.1', '9.9.9.9'],
+                    'total_score': [0.85, 0.72, 0.65]
+                }
+                sample_df = pd.DataFrame(sample_data)
+                
+                visualizer = NetworkVisualizer()
+                sample_fig = visualizer.create_compact_network_diagram(sample_df)
+                st.plotly_chart(sample_fig, use_container_width=True)
 
 
 # Run the app

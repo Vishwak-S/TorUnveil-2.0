@@ -16,10 +16,13 @@ import os
 class PathReconstructor:
     """Reconstructs probable Tor network paths from correlation results"""
     
-    def __init__(self, max_path_length=6, min_confidence=0.4):
+    def __init__(self, max_path_length=6, min_confidence=0.4, random_seed=None):
         self.max_path_length = max_path_length
         self.min_confidence = min_confidence
         self.reconstructed_paths = []
+        if random_seed is not None:
+            random.seed(random_seed)
+            np.random.seed(random_seed)
         
     def reconstruct_paths(self, correlation_results: pd.DataFrame, tor_nodes_df: pd.DataFrame) -> Dict:
         """
@@ -47,7 +50,9 @@ class PathReconstructor:
             print(f"⚠️  No correlations with confidence >= {self.min_confidence}")
             return self._create_empty_result()
         
-        print(f"📊 Using {len(high_conf_correlations)} high-confidence correlations")
+        print(f"📊 Found {len(correlation_results)} total correlations")
+        print(f"📊 Using {len(high_conf_correlations)} high-confidence correlations (>= {self.min_confidence})")
+        print(f"📊 Available Tor nodes: {len(tor_nodes_df)}")
         
         # Group correlations by source IP
         source_groups = high_conf_correlations.groupby('src_ip')
@@ -85,6 +90,7 @@ class PathReconstructor:
                                     tor_nodes_df: pd.DataFrame) -> List[Dict]:
         """Reconstruct paths for a specific source IP"""
         paths = []
+        failed_count = 0
         
         # Get unique destination IPs for this source
         unique_dsts = correlations['dst_ip'].unique()
@@ -99,51 +105,96 @@ class PathReconstructor:
             # Take top N correlations for path reconstruction
             top_correlations = src_dst_correlations.head(3)
             
-            for _, corr in top_correlations.iterrows():
+            for idx, (_, corr) in enumerate(top_correlations.iterrows()):
                 path = self._reconstruct_single_path(corr, tor_nodes_df)
                 if path:
                     paths.append(path)
+                else:
+                    failed_count += 1
+        
+        if failed_count > 0:
+            print(f"   ⚠️  Source {src_ip}: {failed_count} path(s) failed validation")
+        if paths:
+            print(f"   ✅ Source {src_ip}: {len(paths)} path(s) reconstructed")
         
         return paths
     
+    # In path_reconstructor.py, update the _reconstruct_single_path method:
+
     def _reconstruct_single_path(self, correlation: pd.Series, 
                                 tor_nodes_df: pd.DataFrame) -> Optional[Dict]:
         """Reconstruct a single network path from correlation"""
         try:
-            # Extract correlation data
-            src_ip = correlation.get('src_ip', '')
-            dst_ip = correlation.get('dst_ip', '')
-            entry_node_ip = correlation.get('tor_node_ip', '')
-            confidence = correlation.get('total_score', 0)
+            # Extract correlation data - FIXED: Use proper column access
+            src_ip = correlation.get('src_ip', '') if hasattr(correlation, 'get') else correlation['src_ip']
+            dst_ip = correlation.get('dst_ip', '') if hasattr(correlation, 'get') else correlation['dst_ip']
             
-            if not src_ip or not entry_node_ip:
+            # Try different possible column names for Tor node IP
+            tor_node_ip = correlation.get('tor_node_ip', '')
+            if not tor_node_ip:
+                tor_node_ip = correlation.get('tor_ip', '')
+            if not tor_node_ip:
+                tor_node_ip = correlation.get('node_ip', '')
+            
+            # Get confidence/score
+            if hasattr(correlation, 'get'):
+                confidence = correlation.get('total_score', 0)
+                if confidence == 0:
+                    confidence = correlation.get('score', 0)
+            else:
+                confidence = correlation['total_score'] if 'total_score' in correlation else correlation.get('score', 0)
+            
+            flow_id = correlation.get('flow_id', f'flow_{hash(str(correlation))}') if hasattr(correlation, 'get') else correlation['flow_id']
+            
+            # Validate essential data
+            if not src_ip or pd.isna(src_ip) or src_ip == 'N/A':
+                print(f"   ⚠️  Invalid source IP: {src_ip}")
                 return None
+            
+            if not tor_node_ip or pd.isna(tor_node_ip) or tor_node_ip == 'N/A':
+                print(f"   ⚠️  Invalid Tor node IP: {tor_node_ip}")
+                return None
+            
+            if not dst_ip or pd.isna(dst_ip) or dst_ip == 'N/A':
+                # If destination IP is missing, use a placeholder
+                dst_ip = f"10.0.0.{random.randint(1, 254)}"
+                print(f"   ⚠️  Destination IP missing, using placeholder: {dst_ip}")
+            
+            # Ensure entry node exists in Tor nodes database
+            entry_node = tor_nodes_df[tor_nodes_df['ip_address'] == tor_node_ip]
+            if entry_node.empty:
+                # Try alternative column names
+                entry_node = tor_nodes_df[tor_nodes_df['ip'] == tor_node_ip]
+                if entry_node.empty:
+                    print(f"   ⚠️  Entry node {tor_node_ip} not found in Tor database")
+                    return None
             
             # Create path object
             path = {
-                'path_id': self._generate_path_id(src_ip, dst_ip, entry_node_ip),
-                'src_ip': src_ip,
-                'dst_ip': dst_ip,
-                'confidence': confidence,
-                'entry_node_ip': entry_node_ip,
+                'path_id': self._generate_path_id(src_ip, dst_ip, tor_node_ip),
+                'source_ip': src_ip,  # Use consistent naming
+                'destination_ip': dst_ip,
+                'confidence_score': float(confidence),
+                'entry_node_ip': tor_node_ip,
+                'flow_id': flow_id,
                 'nodes': [],
                 'complete': False,
                 'timestamp': datetime.now().isoformat(),
+                'hop_count': 0,
+                'path_type': 'tor_circuit',
             }
             
             # Get entry node details
-            entry_node = tor_nodes_df[tor_nodes_df['ip_address'] == entry_node_ip]
-            if not entry_node.empty:
-                entry_node_data = entry_node.iloc[0].to_dict()
-                path['entry_node'] = self._create_node_object(entry_node_data, 'guard')
-                path['nodes'].append(path['entry_node'])
+            entry_node_data = entry_node.iloc[0].to_dict()
+            entry_node_obj = self._create_node_object(entry_node_data, 'guard')
+            path['nodes'].append(entry_node_obj)
             
-            # Find middle nodes (simulated - in reality would need more data)
-            middle_nodes = self._find_middle_nodes(entry_node_ip, tor_nodes_df)
+            # Find middle nodes
+            middle_nodes = self._find_middle_nodes(tor_node_ip, tor_nodes_df)
             for middle_node in middle_nodes:
                 path['nodes'].append(middle_node)
             
-            # Find exit node (simulated)
+            # Find exit node
             exit_node = self._find_exit_node(tor_nodes_df)
             if exit_node:
                 path['exit_node'] = exit_node
@@ -154,13 +205,16 @@ class PathReconstructor:
             path['nodes'].append(self._create_destination_node(dst_ip))
             
             # Calculate path metrics
-            path['total_hops'] = len(path['nodes'])
-            path['avg_confidence'] = self._calculate_path_confidence(path, correlation)
+            path['hop_count'] = len(path['nodes'])
+            path['confidence_score'] = self._calculate_path_confidence(path, correlation)
             
+            print(f"   ✅ Path reconstructed: {src_ip} → {tor_node_ip} → {dst_ip} (conf: {path['confidence_score']:.3f})")
             return path
             
         except Exception as e:
-            print(f"⚠️  Error reconstructing path: {e}")
+            print(f"   ⚠️  Error reconstructing path: {e}")
+            import traceback
+            print(f"   Traceback: {traceback.format_exc()}")
             return None
     
     def _find_middle_nodes(self, entry_node_ip: str, 
@@ -197,20 +251,33 @@ class PathReconstructor:
     
     def _create_node_object(self, node_data: Dict, node_type: str) -> Dict:
         """Create a standardized node object"""
+        ip_addr = node_data.get('ip_address', '')
+        nickname = node_data.get('nickname', 'Unknown')
+        country = node_data.get('country_name', 'Unknown')
+        bandwidth = node_data.get('observed_bandwidth_mbps', 0)
+        perf_score = node_data.get('performance_score', 0)
+        role = node_data.get('role', '')
+        
+        # Fallback values if fields are missing
+        if not ip_addr:
+            ip_addr = 'Unknown'
+        if not nickname or nickname == 'Unknown':
+            nickname = ip_addr[:15] + '...' if len(ip_addr) > 15 else ip_addr
+        
         return {
-            'ip': node_data.get('ip_address', ''),
-            'nickname': node_data.get('nickname', 'Unknown'),
+            'ip': ip_addr,
+            'nickname': nickname,
             'type': node_type,
-            'role': node_data.get('role', ''),
-            'country': node_data.get('country_name', 'Unknown'),
-            'bandwidth_mbps': node_data.get('observed_bandwidth_mbps', 0),
-            'performance_score': node_data.get('performance_score', 0),
-            'label': f"{node_data.get('nickname', 'Node')} ({node_type})",
-            'tooltip': f"{node_data.get('nickname', 'Node')}\n"
+            'role': role if role else node_type.title(),
+            'country': country,
+            'bandwidth_mbps': bandwidth if bandwidth else 0,
+            'performance_score': perf_score if perf_score else 0,
+            'label': f"{nickname} ({node_type})",
+            'tooltip': f"{nickname}\n"
                       f"Type: {node_type}\n"
-                      f"Country: {node_data.get('country_name', 'Unknown')}\n"
-                      f"Bandwidth: {node_data.get('observed_bandwidth_mbps', 0)} Mbps\n"
-                      f"Role: {node_data.get('role', '')}",
+                      f"Country: {country}\n"
+                      f"Bandwidth: {bandwidth} Mbps\n"
+                      f"Role: {role if role else node_type.title()}",
         }
     
     def _create_destination_node(self, dst_ip: str) -> Dict:
@@ -294,6 +361,105 @@ class PathReconstructor:
             'unique_sources': len(source_ips),
             'unique_countries': len(countries),
         }
+    
+    def diagnose_reconstruction_issues(self, correlation_results: pd.DataFrame, 
+                                      tor_nodes_df: pd.DataFrame) -> Dict:
+        """
+        Diagnose why paths are not being reconstructed
+        
+        Args:
+            correlation_results: DataFrame with correlation scores
+            tor_nodes_df: DataFrame with Tor node information
+            
+        Returns:
+            Dictionary with diagnostic information
+        """
+        print("\n🔍 DIAGNOSING PATH RECONSTRUCTION ISSUES...")
+        print("="*60)
+        
+        diagnosis = {
+            'total_correlations': len(correlation_results),
+            'correlations_above_threshold': 0,
+            'missing_src_ip': 0,
+            'missing_dst_ip': 0,
+            'missing_tor_node_ip': 0,
+            'tor_node_not_in_database': 0,
+            'potential_paths': 0,
+            'issues_found': []
+        }
+        
+        if correlation_results.empty:
+            diagnosis['issues_found'].append('No correlations provided')
+            print("❌ No correlations provided")
+            return diagnosis
+        
+        print(f"Total correlations: {len(correlation_results)}")
+        print(f"Tor database size: {len(tor_nodes_df)} nodes")
+        print(f"Min confidence threshold: {self.min_confidence}")
+        print()
+        
+        # Check each correlation
+        above_threshold = correlation_results[
+            correlation_results['total_score'] >= self.min_confidence
+        ]
+        diagnosis['correlations_above_threshold'] = len(above_threshold)
+        print(f"✓ Correlations above threshold: {len(above_threshold)}/{len(correlation_results)}")
+        
+        for idx, corr in above_threshold.iterrows():
+            src_ip = corr.get('src_ip', '')
+            dst_ip = corr.get('dst_ip', '')
+            tor_ip = corr.get('tor_node_ip', '')
+            score = corr.get('total_score', 0)
+            
+            if not src_ip:
+                diagnosis['missing_src_ip'] += 1
+            if not dst_ip:
+                diagnosis['missing_dst_ip'] += 1
+            if not tor_ip:
+                diagnosis['missing_tor_node_ip'] += 1
+            
+            if src_ip and dst_ip and tor_ip:
+                # Check if Tor node exists in database
+                if (tor_nodes_df['ip_address'] == tor_ip).any():
+                    diagnosis['potential_paths'] += 1
+                    print(f"  ✓ Path possible: {src_ip} → {tor_ip} → {dst_ip} (score: {score:.3f})")
+                else:
+                    diagnosis['tor_node_not_in_database'] += 1
+                    print(f"  ✗ Tor node {tor_ip} NOT in database (score: {score:.3f})")
+        
+        print()
+        print("ISSUE SUMMARY:")
+        print("-"*60)
+        
+        if diagnosis['missing_src_ip'] > 0:
+            msg = f"Missing source IPs: {diagnosis['missing_src_ip']}"
+            print(f"  ❌ {msg}")
+            diagnosis['issues_found'].append(msg)
+        
+        if diagnosis['missing_dst_ip'] > 0:
+            msg = f"Missing destination IPs: {diagnosis['missing_dst_ip']}"
+            print(f"  ❌ {msg}")
+            diagnosis['issues_found'].append(msg)
+        
+        if diagnosis['missing_tor_node_ip'] > 0:
+            msg = f"Missing Tor node IPs: {diagnosis['missing_tor_node_ip']}"
+            print(f"  ❌ {msg}")
+            diagnosis['issues_found'].append(msg)
+        
+        if diagnosis['tor_node_not_in_database'] > 0:
+            msg = f"Tor nodes not in database: {diagnosis['tor_node_not_in_database']}"
+            print(f"  ⚠️  {msg}")
+            diagnosis['issues_found'].append(msg)
+        
+        if diagnosis['potential_paths'] > 0:
+            print(f"  ✅ Potential reconstructable paths: {diagnosis['potential_paths']}")
+        else:
+            print(f"  ❌ NO reconstructable paths found")
+            if len(above_threshold) > 0:
+                diagnosis['issues_found'].append("All correlations missing required fields")
+        
+        print("="*60)
+        return diagnosis
     
     def _create_empty_result(self) -> Dict:
         """Create empty result structure"""

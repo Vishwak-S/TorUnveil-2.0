@@ -21,289 +21,198 @@ class NetworkVisualizer:
         self.colors = {
             'client': '#FF6B6B',  # Red
             'guard': '#4ECDC4',   # Teal
-            'relay': '#95E1D3',   # Light green
+            'relay': '#45B7D1',   # Blue
             'exit': '#FFD166',    # Yellow
             'destination': '#C8C8C8',  # Gray
             'unknown': '#999999',
-            'high_confidence': '#10B981',  # Green
-            'medium_confidence': '#F59E0B',  # Yellow
-            'low_confidence': '#EF4444',  # Red
         }
     
-    def create_network_graph(self, paths_data: Dict) -> Dict:
+    def create_simple_network_graph(self, correlation_results: pd.DataFrame, 
+                                   tor_nodes_df: pd.DataFrame, 
+                                   max_nodes: int = 20) -> go.Figure:
         """
-        Create network graph data from reconstructed paths
-        
-        Args:
-            paths_data: Dictionary with reconstructed paths
-            
-        Returns:
-            Dictionary with nodes and edges for visualization
+        Create a simple network graph showing IP connections
+        Similar to the example image provided
         """
-        if not paths_data or not paths_data.get('paths'):
-            print("⚠️  No paths data for network graph")
-            return self._create_empty_graph()
+        if correlation_results.empty or tor_nodes_df.empty:
+            return self._create_empty_figure()
         
-        print("🎨 Creating network graph visualization...")
+        # Filter for high confidence correlations
+        high_conf = correlation_results[correlation_results['total_score'] >= 0.7]
+        if high_conf.empty:
+            high_conf = correlation_results
         
-        # Initialize graph
-        G = nx.Graph()
-        nodes = []
-        edges = []
+        # Limit number of nodes for clarity
+        if len(high_conf) > max_nodes:
+            high_conf = high_conf.head(max_nodes)
         
-        # Add nodes from all paths
-        node_counter = 0
+        # Create nodes
+        nodes = {}
         node_positions = {}
+        node_counter = 0
         
-        for path in paths_data['paths']:
-            path_nodes = path.get('nodes', [])
-            
-            for i, node in enumerate(path_nodes):
-                node_id = node.get('ip', f'node_{node_counter}')
-                node_type = node.get('type', 'unknown')
+        # Add all unique IPs as nodes
+        all_ips = set()
+        
+        # Add source IPs
+        for ip in high_conf['src_ip'].unique():
+            if pd.notna(ip) and ip not in all_ips:
+                all_ips.add(ip)
+                nodes[ip] = {
+                    'id': ip,
+                    'label': ip,
+                    'type': 'client',
+                    'color': self.colors['client'],
+                    'size': 25,
+                }
+        
+        # Add Tor nodes
+        for _, row in high_conf.iterrows():
+            tor_ip = row.get('tor_node_ip', '')
+            if pd.notna(tor_ip) and tor_ip not in all_ips:
+                all_ips.add(tor_ip)
                 
-                # Create node if not exists
-                if not G.has_node(node_id):
-                    # Calculate position (circular layout for now)
-                    angle = (node_counter * 2 * np.pi) / max(len(paths_data['paths']) * 5, 1)
-                    radius = 300
-                    x = radius * np.cos(angle)
-                    y = radius * np.sin(angle)
-                    
-                    node_data = {
-                        'id': node_id,
-                        'label': node.get('label', node_id),
-                        'type': node_type,
-                        'color': self.colors.get(node_type, self.colors['unknown']),
-                        'size': self._calculate_node_size(node),
-                        'x': x,
-                        'y': y,
-                        'tooltip': self._create_node_tooltip(node),
-                        'metadata': node,
-                    }
-                    
-                    nodes.append(node_data)
-                    G.add_node(node_id, **node_data)
-                    node_positions[node_id] = (x, y)
-                    node_counter += 1
+                # Check if this Tor node exists in our database
+                tor_info = tor_nodes_df[tor_nodes_df['ip_address'] == tor_ip]
+                node_type = 'guard'
+                if not tor_info.empty:
+                    role = tor_info.iloc[0].get('role', '')
+                    if 'Exit' in str(role):
+                        node_type = 'exit'
+                    elif 'Guard' in str(role):
+                        node_type = 'guard'
+                    else:
+                        node_type = 'relay'
                 
-                # Add edge to next node in path
-                if i < len(path_nodes) - 1:
-                    next_node = path_nodes[i + 1]
-                    next_node_id = next_node.get('ip', f'node_{node_counter}')
-                    
-                    edge_id = f"{node_id}_{next_node_id}"
-                    if not G.has_edge(node_id, next_node_id):
-                        edge_data = {
-                            'id': edge_id,
-                            'source': node_id,
-                            'target': next_node_id,
-                            'width': self._calculate_edge_width(path),
-                            'color': self._get_edge_color(path),
-                            'label': f"Path {path.get('path_id', '')[:6]}...",
-                            'tooltip': self._create_edge_tooltip(path, node, next_node),
-                        }
-                        
-                        edges.append(edge_data)
-                        G.add_edge(node_id, next_node_id, **edge_data)
+                nodes[tor_ip] = {
+                    'id': tor_ip,
+                    'label': tor_ip,
+                    'type': node_type,
+                    'color': self.colors[node_type],
+                    'size': 30,
+                }
         
-        # Improve layout if we have nodes
-        if nodes:
-            nodes = self._improve_layout(nodes, edges)
+        # Add destination IPs
+        for ip in high_conf['dst_ip'].unique():
+            if pd.notna(ip) and ip not in all_ips:
+                all_ips.add(ip)
+                nodes[ip] = {
+                    'id': ip,
+                    'label': ip,
+                    'type': 'destination',
+                    'color': self.colors['destination'],
+                    'size': 20,
+                }
         
-        result = {
-            'nodes': nodes,
-            'edges': edges,
-            'metadata': {
-                'total_nodes': len(nodes),
-                'total_edges': len(edges),
-                'generated_at': datetime.now().isoformat(),
-            }
-        }
-        
-        print(f"✅ Created network graph with {len(nodes)} nodes and {len(edges)} edges")
-        return result
-    
-    def _calculate_node_size(self, node: Dict) -> int:
-        """Calculate node size based on its properties"""
-        base_size = 20
-        
-        # Adjust based on node type
-        node_type = node.get('type', '')
-        if node_type == 'client' or node_type == 'destination':
-            return base_size * 1.5
-        elif node_type == 'guard' or node_type == 'exit':
-            return base_size * 2
-        elif node_type == 'relay':
-            return base_size
-        
-        # Adjust based on bandwidth if available
-        bandwidth = node.get('bandwidth_mbps', 0)
-        if bandwidth > 100:
-            return base_size * 3
-        elif bandwidth > 50:
-            return base_size * 2
-        
-        return base_size
-    
-    def _calculate_edge_width(self, path: Dict) -> int:
-        """Calculate edge width based on path confidence"""
-        confidence = path.get('avg_confidence', 0.5)
-        
-        # Width from 1 to 5 based on confidence
-        return max(1, min(5, int(confidence * 10)))
-    
-    def _get_edge_color(self, path: Dict) -> str:
-        """Get edge color based on path confidence"""
-        confidence = path.get('avg_confidence', 0.5)
-        
-        if confidence >= 0.8:
-            return self.colors['high_confidence']
-        elif confidence >= 0.6:
-            return self.colors['medium_confidence']
-        else:
-            return self.colors['low_confidence']
-    
-    def _create_node_tooltip(self, node: Dict) -> str:
-        """Create tooltip text for a node"""
-        tooltip = f"<b>{node.get('nickname', 'Node')}</b><br>"
-        tooltip += f"Type: {node.get('type', 'unknown').title()}<br>"
-        tooltip += f"IP: {node.get('ip', 'N/A')}<br>"
-        
-        if node.get('country') and node.get('country') != 'Unknown':
-            tooltip += f"Country: {node.get('country')}<br>"
-        
-        if node.get('bandwidth_mbps', 0) > 0:
-            tooltip += f"Bandwidth: {node.get('bandwidth_mbps')} Mbps<br>"
-        
-        if node.get('performance_score', 0) > 0:
-            tooltip += f"Performance: {node.get('performance_score'):.2f}<br>"
-        
-        return tooltip
-    
-    def _create_edge_tooltip(self, path: Dict, source_node: Dict, target_node: Dict) -> str:
-        """Create tooltip text for an edge"""
-        tooltip = f"<b>Path Connection</b><br>"
-        tooltip += f"From: {source_node.get('nickname', source_node.get('ip', '?'))}<br>"
-        tooltip += f"To: {target_node.get('nickname', target_node.get('ip', '?'))}<br>"
-        tooltip += f"Path Confidence: {path.get('avg_confidence', 0):.2f}<br>"
-        
-        if path.get('complete', False):
-            tooltip += "Status: Complete Path<br>"
-        else:
-            tooltip += "Status: Incomplete Path<br>"
-        
-        return tooltip
-    
-    def _improve_layout(self, nodes: List[Dict], edges: List[Dict]) -> List[Dict]:
-        """Improve node layout using force-directed simulation"""
-        try:
-            # Create NetworkX graph for layout calculation
-            G = nx.Graph()
-            
-            # Add nodes
-            for node in nodes:
-                G.add_node(node['id'], pos=(node['x'], node['y']))
-            
-            # Add edges
-            for edge in edges:
-                G.add_edge(edge['source'], edge['target'])
-            
-            # Use spring layout for better visualization
-            if len(nodes) > 1:
-                pos = nx.spring_layout(G, seed=42, k=2, iterations=50)
-                
-                # Update node positions
-                for node in nodes:
-                    if node['id'] in pos:
-                        node['x'] = pos[node['id']][0] * 400  # Scale up
-                        node['y'] = pos[node['id']][1] * 400
-            
-        except Exception as e:
-            print(f"⚠️  Error in layout improvement: {e}")
-        
-        return nodes
-    
-    def _create_empty_graph(self) -> Dict:
-        """Create empty graph structure"""
-        return {
-            'nodes': [],
-            'edges': [],
-            'metadata': {
-                'total_nodes': 0,
-                'total_edges': 0,
-                'generated_at': datetime.now().isoformat(),
-            }
-        }
-    
-    def create_plotly_network(self, graph_data: Dict) -> go.Figure:
-        """
-        Create Plotly figure for network visualization
-        
-        Args:
-            graph_data: Dictionary with nodes and edges
-            
-        Returns:
-            Plotly Figure object
-        """
-        if not graph_data or not graph_data['nodes']:
-            # Return empty figure
-            fig = go.Figure()
-            fig.update_layout(
-                title="No network data available",
-                xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                height=500,
-            )
-            return fig
-        
-        nodes = graph_data['nodes']
-        edges = graph_data['edges']
-        
-        # Create edge traces
+        # Create edges
+        edges = []
         edge_x = []
         edge_y = []
-        edge_colors = []
-        edge_widths = []
         
-        for edge in edges:
-            source_node = next((n for n in nodes if n['id'] == edge['source']), None)
-            target_node = next((n for n in nodes if n['id'] == edge['target']), None)
+        for _, row in high_conf.iterrows():
+            src_ip = row['src_ip']
+            tor_ip = row.get('tor_node_ip', '')
+            dst_ip = row['dst_ip']
+            score = row.get('total_score', 0.5)
             
-            if source_node and target_node:
-                edge_x.extend([source_node['x'], target_node['x'], None])
-                edge_y.extend([source_node['y'], target_node['y'], None])
-                edge_colors.append(edge.get('color', '#CCCCCC'))
-                edge_widths.append(edge.get('width', 1))
+            if pd.notna(src_ip) and pd.notna(tor_ip) and src_ip in nodes and tor_ip in nodes:
+                # Edge from source to Tor node
+                edges.append({
+                    'source': src_ip,
+                    'target': tor_ip,
+                    'score': score,
+                    'width': max(1, score * 5),
+                })
+            
+            if pd.notna(tor_ip) and pd.notna(dst_ip) and tor_ip in nodes and dst_ip in nodes:
+                # Edge from Tor node to destination
+                edges.append({
+                    'source': tor_ip,
+                    'target': dst_ip,
+                    'score': score,
+                    'width': max(1, score * 3),
+                })
         
-        # Create edge trace
-        edge_trace = go.Scatter(
-            x=edge_x,
-            y=edge_y,
-            mode='lines',
-            line=dict(
-                width=edge_widths[0] if edge_widths else 1,
-                color=edge_colors[0] if edge_colors else '#CCCCCC'
-            ),
-            hoverinfo='none',
-            showlegend=False,
-        )
+        # Create figure with circular layout
+        fig = go.Figure()
         
-        # Prepare node data
-        node_x = [node['x'] for node in nodes]
-        node_y = [node['y'] for node in nodes]
-        node_colors = [node['color'] for node in nodes]
-        node_sizes = [node['size'] for node in nodes]
-        node_texts = [node['tooltip'] for node in nodes]
-        node_labels = [node['label'] for node in nodes]
+        # Calculate positions in a circle
+        node_list = list(nodes.keys())
+        num_nodes = len(node_list)
         
-        # Create node trace
-        node_trace = go.Scatter(
+        for i, node_id in enumerate(node_list):
+            angle = 2 * np.pi * i / num_nodes
+            radius = 2.0
+            x = radius * np.cos(angle)
+            y = radius * np.sin(angle)
+            node_positions[node_id] = (x, y)
+        
+        # Add edges
+        for edge in edges:
+            src = edge['source']
+            tgt = edge['target']
+            
+            if src in node_positions and tgt in node_positions:
+                x0, y0 = node_positions[src]
+                x1, y1 = node_positions[tgt]
+                
+                # Add edge trace
+                fig.add_trace(go.Scatter(
+                    x=[x0, x1, None],
+                    y=[y0, y1, None],
+                    mode='lines',
+                    line=dict(
+                        width=edge['width'],
+                        color=f'rgba(100, 100, 100, {edge["score"] * 0.7})'
+                    ),
+                    hoverinfo='none',
+                    showlegend=False,
+                ))
+        
+        # Add nodes
+        node_x = []
+        node_y = []
+        node_colors = []
+        node_sizes = []
+        node_texts = []
+        node_labels = []
+        
+        for node_id in node_list:
+            x, y = node_positions[node_id]
+            node_x.append(x)
+            node_y.append(y)
+            
+            node_info = nodes[node_id]
+            node_colors.append(node_info['color'])
+            node_sizes.append(node_info['size'])
+            node_labels.append(node_info['label'])
+            
+            # Create hover text
+            hover_text = f"<b>{node_info['label']}</b><br>"
+            hover_text += f"Type: {node_info['type'].title()}<br>"
+            
+            # Add Tor node info if available
+            if node_info['type'] in ['guard', 'relay', 'exit']:
+                tor_info = tor_nodes_df[tor_nodes_df['ip_address'] == node_info['label']]
+                if not tor_info.empty:
+                    country = tor_info.iloc[0].get('country_name', 'Unknown')
+                    bandwidth = tor_info.iloc[0].get('observed_bandwidth_mbps', 0)
+                    hover_text += f"Country: {country}<br>"
+                    hover_text += f"Bandwidth: {bandwidth} Mbps"
+            
+            node_texts.append(hover_text)
+        
+        # Add node trace
+        fig.add_trace(go.Scatter(
             x=node_x,
             y=node_y,
             mode='markers+text',
             text=node_labels,
             textposition="top center",
+            textfont=dict(
+                size=10,
+                color='black'
+            ),
             hovertext=node_texts,
             hoverinfo='text',
             marker=dict(
@@ -312,32 +221,40 @@ class NetworkVisualizer:
                 line=dict(width=2, color='white')
             ),
             showlegend=False,
-        )
+        ))
         
-        # Create figure
-        fig = go.Figure(data=[edge_trace, node_trace])
-        
-        # Update layout
+        # Update layout for clean appearance
         fig.update_layout(
-            title='TOR Network Path Visualization',
-            showlegend=False,
+            title='Network Graph Visualization',
+            showlegend=True,
             hovermode='closest',
-            margin=dict(b=20, l=5, r=5, t=40),
-            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-            height=600,
+            margin=dict(b=0, l=0, r=0, t=40),
+            xaxis=dict(
+                showgrid=False,
+                zeroline=False,
+                showticklabels=False,
+                range=[-3, 3]
+            ),
+            yaxis=dict(
+                showgrid=False,
+                zeroline=False,
+                showticklabels=False,
+                range=[-3, 3]
+            ),
+            height=500,
             plot_bgcolor='white',
+            paper_bgcolor='white',
         )
         
-        # Add legend for node types
-        self._add_node_legend(fig)
+        # Add legend
+        self._add_simple_legend(fig)
         
         return fig
     
-    def _add_node_legend(self, fig: go.Figure):
-        """Add legend for node types to the figure"""
+    def _add_simple_legend(self, fig: go.Figure):
+        """Add a simple legend to the figure"""
         legend_items = [
-            ('Client', self.colors['client']),
+            ('Client IP', self.colors['client']),
             ('Guard Node', self.colors['guard']),
             ('Relay Node', self.colors['relay']),
             ('Exit Node', self.colors['exit']),
@@ -355,211 +272,153 @@ class NetworkVisualizer:
                 showlegend=True
             ))
     
-    def create_correlation_heatmap(self, correlation_results: pd.DataFrame) -> go.Figure:
-        """
-        Create heatmap of correlation scores
-        
-        Args:
-            correlation_results: DataFrame with correlation scores
-            
-        Returns:
-            Plotly Figure object with heatmap
-        """
-        if correlation_results.empty:
-            fig = go.Figure()
-            fig.update_layout(
-                title="No correlation data available",
-                height=400,
-            )
-            return fig
-        
-        # Prepare data for heatmap
-        # Group by source IP and Tor node country
-        heatmap_data = correlation_results.groupby(['src_ip', 'tor_node_country']).agg({
-            'total_score': 'mean'
-        }).unstack(fill_value=0)
-        
-        # Flatten column names
-        heatmap_data.columns = [col[1] for col in heatmap_data.columns]
-        
-        # Create heatmap
-        fig = go.Figure(data=go.Heatmap(
-            z=heatmap_data.values,
-            x=heatmap_data.columns.tolist(),
-            y=heatmap_data.index.tolist(),
-            colorscale='RdYlGn',
-            zmin=0,
-            zmax=1,
-            colorbar=dict(title='Correlation Score'),
-            hoverongaps=False,
-            text=heatmap_data.values.round(3),
-            texttemplate='%{text}',
-            textfont={"size": 10},
-        ))
-        
+    def _create_empty_figure(self) -> go.Figure:
+        """Create an empty figure placeholder"""
+        fig = go.Figure()
         fig.update_layout(
-            title='Correlation Heatmap: Source IP vs Tor Node Country',
-            xaxis_title='Tor Node Country',
-            yaxis_title='Source IP',
-            height=500,
-            width=800,
+            title="No data available for visualization",
+            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            height=400,
+            plot_bgcolor='white',
         )
-        
         return fig
     
-    def create_score_distribution(self, correlation_results: pd.DataFrame) -> go.Figure:
+    def create_compact_network_diagram(self, correlation_results: pd.DataFrame) -> go.Figure:
         """
-        Create distribution of correlation scores
-        
-        Args:
-            correlation_results: DataFrame with correlation scores
-            
-        Returns:
-            Plotly Figure object with distribution
+        Create a compact network diagram showing just IP connections
+        Very similar to the provided example image
         """
         if correlation_results.empty:
-            fig = go.Figure()
-            fig.update_layout(
-                title="No correlation data available",
-                height=400,
-            )
-            return fig
+            return self._create_empty_figure()
         
-        # Create histogram
+        # Take top correlations
+        top_corr = correlation_results.nlargest(10, 'total_score')
+        
+        # Collect all unique IPs
+        ip_addresses = set()
+        
+        for _, row in top_corr.iterrows():
+            ip_addresses.add(str(row['src_ip']))
+            ip_addresses.add(str(row['tor_node_ip']))
+            ip_addresses.add(str(row['dst_ip']))
+        
+        ip_list = list(ip_addresses)
+        
+        # Create matrix layout (grid-like)
         fig = go.Figure()
         
-        fig.add_trace(go.Histogram(
-            x=correlation_results['total_score'],
-            nbinsx=20,
-            name='All Correlations',
-            marker_color=self.colors['medium_confidence'],
-            opacity=0.7,
+        # Simple grid layout
+        num_cols = 3
+        positions = {}
+        
+        for i, ip in enumerate(ip_list):
+            row = i // num_cols
+            col = i % num_cols
+            positions[ip] = (col * 4, -row * 4)
+        
+        # Add connections (edges)
+        for _, row in top_corr.iterrows():
+            src_ip = str(row['src_ip'])
+            tor_ip = str(row['tor_node_ip'])
+            dst_ip = str(row['dst_ip'])
+            score = row['total_score']
+            
+            if src_ip in positions and tor_ip in positions:
+                x0, y0 = positions[src_ip]
+                x1, y1 = positions[tor_ip]
+                
+                fig.add_trace(go.Scatter(
+                    x=[x0, x1, None],
+                    y=[y0, y1, None],
+                    mode='lines',
+                    line=dict(
+                        width=max(1, score * 4),
+                        color='rgba(100, 149, 237, 0.6)'  # Cornflower blue
+                    ),
+                    hoverinfo='none',
+                    showlegend=False,
+                ))
+            
+            if tor_ip in positions and dst_ip in positions:
+                x0, y0 = positions[tor_ip]
+                x1, y1 = positions[dst_ip]
+                
+                fig.add_trace(go.Scatter(
+                    x=[x0, x1, None],
+                    y=[y0, y1, None],
+                    mode='lines',
+                    line=dict(
+                        width=max(1, score * 3),
+                        color='rgba(255, 165, 0, 0.6)'  # Orange
+                    ),
+                    hoverinfo='none',
+                    showlegend=False,
+                ))
+        
+        # Add nodes (IP addresses)
+        node_x = []
+        node_y = []
+        node_texts = []
+        node_colors = []
+        
+        for ip in ip_list:
+            x, y = positions[ip]
+            node_x.append(x)
+            node_y.append(y)
+            node_texts.append(ip)
+            
+            # Determine node color based on IP type
+            if ip.startswith('192.168.'):
+                node_colors.append(self.colors['client'])  # Client IPs
+            elif ip in top_corr['tor_node_ip'].values:
+                node_colors.append(self.colors['guard'])   # Tor nodes
+            else:
+                node_colors.append(self.colors['destination'])  # Destinations
+        
+        # Add nodes
+        fig.add_trace(go.Scatter(
+            x=node_x,
+            y=node_y,
+            mode='markers+text',
+            text=node_texts,
+            textposition="top center",
+            textfont=dict(
+                size=9,
+                family='monospace'
+            ),
+            hovertext=[f"IP: {ip}" for ip in ip_list],
+            hoverinfo='text',
+            marker=dict(
+                size=25,
+                color=node_colors,
+                line=dict(width=2, color='white')
+            ),
+            showlegend=False,
         ))
         
-        # Add vertical lines for confidence thresholds
-        fig.add_vline(x=0.8, line_dash="dash", line_color=self.colors['high_confidence'],
-                     annotation_text="High Confidence", annotation_position="top right")
-        fig.add_vline(x=0.6, line_dash="dash", line_color=self.colors['medium_confidence'],
-                     annotation_text="Medium Confidence", annotation_position="top right")
-        fig.add_vline(x=0.4, line_dash="dash", line_color=self.colors['low_confidence'],
-                     annotation_text="Low Confidence", annotation_position="top right")
-        
+        # Update layout for clean look
         fig.update_layout(
-            title='Distribution of Correlation Scores',
-            xaxis_title='Correlation Score',
-            yaxis_title='Count',
+            title="Network Connections",
+            showlegend=False,
+            hovermode='closest',
+            margin=dict(b=20, l=20, r=20, t=40),
+            xaxis=dict(
+                showgrid=False,
+                zeroline=False,
+                showticklabels=False,
+            ),
+            yaxis=dict(
+                showgrid=False,
+                zeroline=False,
+                showticklabels=False,
+            ),
             height=400,
-            bargap=0.1,
+            width=600,
+            plot_bgcolor='white',
         )
         
         return fig
-    
-    def create_path_length_chart(self, paths_data: Dict) -> go.Figure:
-        """
-        Create chart showing path length distribution
-        
-        Args:
-            paths_data: Dictionary with reconstructed paths
-            
-        Returns:
-            Plotly Figure object
-        """
-        if not paths_data or not paths_data.get('paths'):
-            fig = go.Figure()
-            fig.update_layout(
-                title="No path data available",
-                height=400,
-            )
-            return fig
-        
-        # Extract path lengths
-        path_lengths = [len(p.get('nodes', [])) for p in paths_data['paths']]
-        
-        # Create bar chart
-        fig = go.Figure(data=[
-            go.Histogram(
-                x=path_lengths,
-                nbinsx=max(5, len(set(path_lengths))),
-                marker_color=self.colors['guard'],
-                opacity=0.7,
-            )
-        ])
-        
-        fig.update_layout(
-            title='Distribution of Path Lengths (Number of Hops)',
-            xaxis_title='Path Length (Hops)',
-            yaxis_title='Number of Paths',
-            height=400,
-            bargap=0.1,
-        )
-        
-        return fig
-    
-    def create_country_distribution(self, tor_nodes_df: pd.DataFrame) -> go.Figure:
-        """
-        Create bar chart of Tor node distribution by country
-        
-        Args:
-            tor_nodes_df: DataFrame with Tor node information
-            
-        Returns:
-            Plotly Figure object
-        """
-        if tor_nodes_df.empty:
-            fig = go.Figure()
-            fig.update_layout(
-                title="No Tor node data available",
-                height=400,
-            )
-            return fig
-        
-        # Count nodes by country
-        country_counts = tor_nodes_df['country_name'].value_counts().reset_index()
-        country_counts.columns = ['Country', 'Node Count']
-        
-        # Create bar chart
-        fig = px.bar(
-            country_counts.head(15),  # Top 15 countries
-            x='Country',
-            y='Node Count',
-            title='Top 15 Countries by Tor Node Count',
-            color='Node Count',
-            color_continuous_scale='Blues',
-        )
-        
-        fig.update_layout(
-            height=500,
-            xaxis_tickangle=-45,
-        )
-        
-        return fig
-    
-    def save_visualization(self, fig: go.Figure, filename: str = None) -> str:
-        """
-        Save visualization to HTML file
-        
-        Args:
-            fig: Plotly Figure object
-            filename: Output filename (optional)
-            
-        Returns:
-            Path to saved file
-        """
-        if filename is None:
-            filename = os.path.join("data", "visualizations", f"network_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html")
-        
-        try:
-            # Ensure directory exists
-            os.makedirs(os.path.dirname(filename), exist_ok=True)
-            
-            # Save as HTML
-            fig.write_html(filename)
-            print(f"💾 Saved visualization to {filename}")
-            return filename
-            
-        except Exception as e:
-            print(f"❌ Error saving visualization: {e}")
-            return ""
 
 # Test function
 def test_visualization_module():
