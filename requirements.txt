@@ -6,3 +6,11 @@ requests
 scapy
 reportlab
 pypdf
+streamlit
+pandas
+numpy
+plotly
+scapy
+networkx
+requests
+
